@@ -40,8 +40,22 @@
   const escapeHtml = s => String(s).replace(/[&<>'"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[c]));
   const errorText = e => (e === 'offline' ? 'RAG app is not running at 127.0.0.1:8000' : escapeHtml(e));
 
+  function connected() {
+    try { return Boolean(chrome.runtime?.id); } catch { return false; }
+  }
+
+  function disconnect() {
+    cancelAnimationFrame(frame);
+    timers.forEach(clearInterval);
+    host?.remove();
+    host = ui = spider = page = popup = url = null;
+  }
+
+  const guarded = fn => () => (connected() ? fn() : disconnect());
+
   function send(message) {
     return new Promise(resolve => {
+      if (!connected()) { disconnect(); return resolve({ok: false, error: 'Extension was reloaded, refresh this page'}); }
       try { chrome.runtime.sendMessage(message, r => resolve(r || {ok: false, error: chrome.runtime.lastError?.message || 'No reply'})); }
       catch { resolve({ok: false, error: 'Extension was reloaded, refresh this page'}); }
     });
@@ -68,7 +82,8 @@
   }
 
   async function restore(view) {
-    const stored = (await chrome.storage.local.get(view.key))[view.key];
+    if (!connected()) return;
+    const stored = (await chrome.storage.local.get(view.key).catch(() => ({})))[view.key];
     if (!stored || stored.sig !== view.sig) return;
     for (const [a, b] of stored.ranges) for (let i = a; i <= b && i < view.items.length; i++) markRead(view, i, 1);
     view.dirty = false;
@@ -77,20 +92,22 @@
 
   function remember(view) {
     if (!view || !view.dirty) return;
+    if (!connected()) return disconnect();
     const ranges = [];
     view.items.forEach((item, i) => {
       if (!item.at) return;
       const last = ranges[ranges.length - 1];
       if (last && last[1] === i - 1) last[1] = i; else ranges.push([i, i]);
     });
-    chrome.storage.local.set({[view.key]: {sig: view.sig, ranges, t: Date.now()}});
+    chrome.storage.local.set({[view.key]: {sig: view.sig, ranges, t: Date.now()}}).catch(() => {});
     view.dirty = false;
   }
 
   async function pruneMemory() {
-    const all = await chrome.storage.local.get(null);
+    if (!connected()) return;
+    const all = await chrome.storage.local.get(null).catch(() => ({}));
     const old = Object.entries(all).filter(([k]) => k.startsWith('read:')).sort((a, b) => b[1].t - a[1].t).slice(MEMORY_LIMIT);
-    if (old.length) chrome.storage.local.remove(old.map(([k]) => k));
+    if (old.length) chrome.storage.local.remove(old.map(([k]) => k)).catch(() => {});
   }
 
   const httpStatus = () => performance.getEntriesByType('navigation')[0]?.responseStatus || 200;
@@ -278,6 +295,7 @@
 
   function loop(time) {
     if (!ui) return;
+    if (!connected()) return disconnect();
     const dt = Math.min(0.05, (time - lastTime) / 1000 || 0);
     lastTime = time;
     if (!document.hidden) { update(dt, time); draw(time); }
@@ -356,7 +374,7 @@
       canvas: root.querySelector('canvas'), start: root.querySelector('.start'), stop: root.querySelector('.stop'),
       limit: root.querySelector('select'), stat: root.querySelector('.stat'), bar: root.querySelector('.bar i'), state: root.querySelector('.state'),
     };
-    root.querySelector('.x').addEventListener('click', () => chrome.storage.local.set({enabled: false}));
+    root.querySelector('.x').addEventListener('click', guarded(() => chrome.storage.local.set({enabled: false})));
     ui.start.addEventListener('click', startCrawl);
     ui.stop.addEventListener('click', stopCrawl);
     document.documentElement.append(host);
@@ -365,8 +383,8 @@
     startPage();
     pruneMemory();
     timers = [
-      setInterval(watch, WATCH_MS), setInterval(rescan, RESCAN_MS),
-      setInterval(() => { remember(page); remember(popup); }, REMEMBER_MS),
+      setInterval(guarded(watch), WATCH_MS), setInterval(guarded(rescan), RESCAN_MS),
+      setInterval(guarded(() => { remember(page); remember(popup); }), REMEMBER_MS),
     ];
     lastTime = performance.now();
     frame = requestAnimationFrame(loop);
@@ -375,10 +393,7 @@
   function teardown() {
     remember(page); remember(popup);
     if (crawling) stopCrawl();
-    cancelAnimationFrame(frame);
-    timers.forEach(clearInterval);
-    host?.remove();
-    host = ui = spider = page = popup = url = null;
+    disconnect();
   }
 
   addEventListener('mousemove', e => Object.assign(mouse, {x: e.clientX, y: e.clientY, movedAt: performance.now()}), {passive: true});

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RAG Spider",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "A spider that follows your mouse and crawls the site you are on into your local RAG app.",
   "icons": {"16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png"},
   "action": {
