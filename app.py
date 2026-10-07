@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import math
 import re
 import time
@@ -184,6 +185,17 @@ def ensure_model(conn) -> tuple[int, int]:
                            normalized=EXCLUDED.normalized
                        RETURNING id, dimension''', (settings.embed_model, dimension, settings.embed_max_input_tokens, settings.embed_normalize, 'ollama'))
         return cur.fetchone()
+
+
+def on_this_computer(host: str) -> bool:
+    host = (host or '').strip('[]').lower()
+    if host == 'localhost' or host.endswith('.localhost'):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
 
 
 def page_key(url: str, section: str | None = None) -> str:
@@ -371,8 +383,8 @@ def health():
 def api_ingest_page(request: PageRequest, http_request: Request):
     try:
         key = page_key(request.url, request.section)
-        if urlsplit(key).netloc == http_request.url.netloc:
-            raise ValueError('Pages of the RAG app itself are not saved')
+        if urlsplit(key).netloc == http_request.url.netloc or on_this_computer(urlsplit(key).hostname):
+            raise ValueError('Pages from this computer (localhost) are not saved')
         document_id = existing_document(key)
         if document_id:
             return {'status': 'duplicate', 'document_id': document_id}

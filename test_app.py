@@ -226,8 +226,28 @@ def test_data_stats_counts_pages_and_chunks(monkeypatch):
 
 
 def test_the_app_never_saves_its_own_pages(monkeypatch):
-    monkeypatch.setattr(app, 'store_document', lambda *a: (_ for _ in ()).throw(AssertionError('must not store the app itself')))
+    stored = []
+    monkeypatch.setattr(app, 'store_document', lambda *a: stored.append(a) or {'status': 'ingested'})
+    monkeypatch.setattr(app, 'existing_document', lambda key: None)
     own_page = app.PageRequest(url='http://127.0.0.1:8000/', title='RAG Reference', text='NASA X-59 samolyoti soatiga 1 625 kilometr ' * 3)
     with pytest.raises(app.HTTPException) as error:
         app.api_ingest_page(own_page, APP_REQUEST)
-    assert error.value.status_code == 400
+    assert error.value.status_code == 400 and stored == []
+
+
+@pytest.mark.parametrize('url', ['http://localhost:8005/pages', 'http://127.0.0.1:8000/', 'http://127.5.5.5/x', 'http://[::1]:3000/', 'http://app.localhost/'])
+def test_pages_from_this_computer_are_never_saved(monkeypatch, url):
+    stored = []
+    monkeypatch.setattr(app, 'store_document', lambda *a: stored.append(a) or {'status': 'ingested'})
+    monkeypatch.setattr(app, 'existing_document', lambda key: None)
+    request = app.PageRequest(url=url, title='Local app', text='Some local dashboard text that is long enough.')
+    with pytest.raises(app.HTTPException) as error:
+        app.api_ingest_page(request, SimpleNamespace(url=SimpleNamespace(netloc='127.0.0.1:9999')))
+    assert error.value.status_code == 400 and stored == []
+
+
+def test_internal_network_sites_can_still_be_saved(monkeypatch):
+    monkeypatch.setattr(app, 'existing_document', lambda key: None)
+    monkeypatch.setattr(app, 'store_document', lambda *a: {'status': 'ingested', 'chunks': 1})
+    request = app.PageRequest(url='http://192.168.100.174/projects', title='Projects', text='Internal company projects page with enough text.')
+    assert app.api_ingest_page(request, APP_REQUEST)['status'] == 'ingested'

@@ -1,12 +1,14 @@
 importScripts('crawl.js');
 
 const API = 'http://127.0.0.1:8000';
-const APP_HOSTS = new Set(['127.0.0.1:8000', 'localhost:8000']);
-const isAppPage = url => APP_HOSTS.has(new URL(url).host);
+function isLocalMachine(url) {
+  const host = new URL(url).hostname;
+  return host === 'localhost' || host.endsWith('.localhost') || host.startsWith('127.') || host === '[::1]' || host === '0.0.0.0';
+}
 const MAX_TEXT = 500000;
 const LIMITS = new Set([100, 500, 1000, 2000]);
 const OUTCOMES = new Set(['ingested', 'duplicate', 'failed']);
-const NEXT_PAGE_DELAY_MS = 1000, PAGE_TIMEOUT_MS = 30000, WATCHDOG = 'crawl-watchdog';
+const NEXT_PAGE_DELAY_MS = 1800, PAGE_TIMEOUT_MS = 30000, WATCHDOG = 'crawl-watchdog';
 
 async function setBadge(enabled) {
   await chrome.action.setBadgeText({text: enabled ? 'ON' : ''});
@@ -38,7 +40,7 @@ async function call(path, body) {
 
 function savePage({url, title, text, section}) {
   if (typeof url !== 'string' || !/^https?:\/\//.test(url)) throw new Error('This page cannot be saved');
-  if (isAppPage(url)) throw new Error('The RAG app itself is not saved');
+  if (isLocalMachine(url)) throw new Error('Pages from this computer (localhost) are not saved');
   if (typeof text !== 'string' || text.length > MAX_TEXT) throw new Error('Page text is too large');
   return call('/api/ingest/page', {url, title: String(title || '').slice(0, 1000), text, section: section ? String(section).slice(0, 200) : null});
 }
@@ -47,7 +49,7 @@ const getCrawl = async () => (await chrome.storage.session.get('crawl')).crawl |
 
 function summary(crawl) {
   const {running, phase, host, limit, done, ingested, duplicate, failed, skipped, found, current} = crawl;
-  return {running, phase, host, limit, done, ingested, duplicate, failed, skipped, found, current};
+  return {running, phase, host, limit, done, ingested, duplicate, failed, skipped, found, current, next: running ? crawl.expected : null};
 }
 
 async function saveCrawl(crawl) {
@@ -94,7 +96,7 @@ function record(crawl, {url, title, outcome, links}) {
 
 async function startCrawl(tabId, message) {
   if (!LIMITS.has(message.limit)) throw new Error('Invalid page limit');
-  if (typeof message.url !== 'string' || !/^https?:\/\//.test(message.url) || isAppPage(message.url)) throw new Error('This page cannot be crawled');
+  if (typeof message.url !== 'string' || !/^https?:\/\//.test(message.url) || isLocalMachine(message.url)) throw new Error('This page cannot be crawled');
   const existing = await getCrawl();
   if (existing?.running) throw new Error('A crawl is already running. Stop it first.');
   const {origin, host} = new URL(message.url);

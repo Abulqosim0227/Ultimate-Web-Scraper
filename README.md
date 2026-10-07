@@ -38,7 +38,7 @@ Everything runs on your machine: FastAPI, PostgreSQL with pgvector, and Ollama w
   - **Remembers** what it read: revisit a page and the highlights come back instantly; a page is **never saved twice**.
   - Works on **internal sites** too, because the browser sends the text it sees.
   - **Crawl whole site**: the spider travels through the website in your tab, page by page (100 to 2000 pages), reads and saves each page, respects `robots.txt`, and shows a **Windows notification** when it is done. Because your browser does the crawling, it reaches internal sites and pages you are logged into, and the server never downloads anything.
-  - **Error pages** (HTTP 404, 500, ...) are never saved.
+  - **Error pages** (HTTP 404, 500, ...) and **pages from your own computer** (`localhost`, `127.0.0.1`) are never saved.
 - **Grounded chat**: a ChatGPT/Claude-style UI with chat history, citations you can click, a **How to use** guide, light and dark mode, and a collapsible sidebar.
 - **No hallucinated answers**: questions that your documents don't cover (world knowledge, "write a poem", prompt injection) get *"No answer in your documents"*.
 - **Hybrid search**: pgvector cosine search plus keyword search on the rare words of the question, fused with reciprocal rank fusion.
@@ -200,7 +200,7 @@ The app has a built-in **How to use** page in the sidebar. In short:
 | Collect a page | Turn the spider on and open the page. Wait until the panel says *saved to your database* (or *already in your database*) before asking about it; a page that is still saving cannot be found yet. |
 | Make the spider read | Move the mouse: it follows and highlights what it walks over. Stop moving: it reads the rest of the visible page by itself. Scroll: it reads the new text. |
 | Collect a popup | Open it; it is read and saved as its own entry. |
-| Crawl a whole site | In the spider panel choose a limit and press **Crawl whole site**. The spider moves this tab through the site, reading and saving each page; use another tab meanwhile. A Windows notification tells you when it is finished. **Stop** ends it; a later crawl skips pages already saved. |
+| Crawl a whole site | In the spider panel choose a limit and press **Crawl whole site**. The spider moves this tab through the site, reading and saving each page; links in the page's content (such as news headlines) come before menu links, and you can watch the spider walk to and click each next link. Use another tab meanwhile. A Windows notification tells you when it is finished. **Stop** ends it; a later crawl skips pages already saved. |
 | Ask | Type in the chat. Click a citation number to see its source. Name the person, company or topic; ask in the language of the source for the most exact wording. Each question is answered on its own. |
 | Hide the sidebar | Click the panel icon at the top left. |
 | Delete everything collected | **Clean up all data** in the sidebar, then type `DELETE`. Chats in the browser and spider highlights are not affected. |
@@ -273,7 +273,7 @@ The app listens on `http://127.0.0.1:8000`. All POST endpoints take JSON.
 run_tests.bat
 ```
 
-Runs 39 offline unit tests: chunk offsets and overlap, the similarity gate, citation checking, rare-word keyword search, page keys, browser saves and duplicates, never saving the app itself, and the data clean-up endpoints. No database or Ollama is needed.
+Runs 45 offline unit tests: chunk offsets and overlap, the similarity gate, citation checking, rare-word keyword search, page keys, browser saves and duplicates, never saving the app itself, and the data clean-up endpoints. No database or Ollama is needed.
 
 ```bat
 .venv\Scripts\python.exe eval_rag.py
@@ -294,7 +294,7 @@ Writes `db/ragdb.dump` (PostgreSQL custom format) from the database in `.env`. S
 - **Local only**: the server binds to `127.0.0.1`; there is no login, so do not expose it to a network.
 - **The server never downloads web pages**: it only stores text your browser sends, so it cannot be tricked into reading your internal network (SSRF). Crawling happens in your browser, with your own access.
 - **No cross-site posting**: all write endpoints accept JSON only, so a website cannot silently post into the app.
-- **The app never saves itself**: pages of the RAG app are excluded in the extension and rejected by the server.
+- **The app never saves itself or other local apps**: pages from `localhost` / `127.0.0.1` are excluded in the extension and rejected by the server.
 - **Secrets stay out of git**: `.env` is ignored; only `.env.example` is committed.
 - **Deleting data** requires typing `DELETE`.
 

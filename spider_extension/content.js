@@ -3,14 +3,14 @@
   window.__ragSpider = true;
 
   const COLORS = ['#ff2bd6', '#38e1ff', '#3dff8f', '#ffc93d'];
-  const READ_SPEED = 420, FOLLOW_SPEED = 700, FOOT_RADIUS = 24, MOUSE_PRIORITY_MS = 1500;
+  const READ_SPEED = 420, FOLLOW_SPEED = 700, CLICK_SPEED = 1400, FOOT_RADIUS = 24, MOUSE_PRIORITY_MS = 1500;
   const MIN_PAGE_TEXT = 200, MIN_POPUP_TEXT = 40;
   const CRAWL_SETTLE_MS = 1200, CRAWL_READ_MS = 2500;
   const MEASURE_MS = 700, WATCH_MS = 500, RESCAN_MS = 2000, REMEMBER_MS = 1000, MEMORY_LIMIT = 400;
 
   const mouse = {x: innerWidth * 0.6, y: innerHeight * 0.4, movedAt: 0};
   let host = null, ui = null, spider = null, frame = null, lastTime = 0, timers = [], crawling = false;
-  let url = null, page = null, popup = null, inset = 0, measuredAt = 0;
+  let url = null, page = null, popup = null, inset = 0, measuredAt = 0, clickTarget = null;
 
   const STYLE = `
     :host{all:initial}
@@ -237,8 +237,10 @@
     }
     const view = activeView();
     const followMouse = now - mouse.movedAt < MOUSE_PRIORITY_MS;
-    const target = !followMouse && view && nearestUnread(view, popup ? 0 : inset);
-    if (target) spider.walk(target.x + target.w / 2, target.y + target.h / 2, READ_SPEED, dt);
+    const link = clickTarget?.getBoundingClientRect();
+    const target = !link?.width && !followMouse && view && nearestUnread(view, popup ? 0 : inset);
+    if (link?.width) spider.walk(link.left + link.width / 2 + scrollX, link.top + link.height / 2 + scrollY, CLICK_SPEED, dt);
+    else if (target) spider.walk(target.x + target.w / 2, target.y + target.h / 2, READ_SPEED, dt);
     else spider.walk(mouse.x + scrollX, mouse.y + scrollY, FOLLOW_SPEED, dt);
     readAround(spider.x, spider.y, spider.radius, now);
     spider.step(dt, (x, y) => readAround(x, y, FOOT_RADIUS, now));
@@ -290,6 +292,15 @@
       ctx.restore();
     }
     if (popup) drawItems(ctx, popup, 0, now);
+    const link = clickTarget?.getBoundingClientRect();
+    if (link?.width) {
+      ctx.save();
+      ctx.shadowColor = '#ff2bd6'; ctx.shadowBlur = 18 + 8 * Math.sin(now / 120);
+      ctx.fillStyle = '#ff2bd633'; ctx.strokeStyle = '#ff2bd6'; ctx.lineWidth = 3;
+      ctx.fillRect(link.left - 4, link.top - 3, link.width + 8, link.height + 6);
+      ctx.strokeRect(link.left - 4, link.top - 3, link.width + 8, link.height + 6);
+      ctx.restore();
+    }
     spider.draw(ctx, scrollX, scrollY);
   }
 
@@ -303,7 +314,19 @@
   }
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const pageLinks = () => [...new Set([...document.querySelectorAll('a[href]')].map(a => a.href))].slice(0, 5000);
+  function pageLinks() {
+    const main = page?.root || document.body, all = [...document.querySelectorAll('a[href]')];
+    const content = all.filter(a => main.contains(a) && !a.closest('nav,header,footer,aside'));
+    const rest = all.filter(a => !content.includes(a));
+    return [...new Set([...content, ...rest].map(a => a.href))].slice(0, 5000);
+  }
+
+  function showNextClick(next) {
+    if (!next || !ui) return;
+    const links = [...document.querySelectorAll('a[href]')].filter(a => a.href.split('#')[0] === next && a.getClientRects().length);
+    clickTarget = links.find(a => !a.closest('nav,header,footer,aside')) || links[0] || null;
+    clickTarget?.scrollIntoView({block: 'center', behavior: 'smooth'});
+  }
 
   async function startPage() {
     url = location.href;
@@ -316,7 +339,9 @@
     if (!ui) return;
     const outcome = await loadPage();
     await sleep(CRAWL_READ_MS);
-    if (ui && crawling) send({type: 'crawlPage', url: location.href, title: document.title, outcome, links: pageLinks()});
+    if (!ui || !crawling) return;
+    const reply = await send({type: 'crawlPage', url: location.href, title: document.title, outcome, links: pageLinks()});
+    if (reply.ok && reply.data) showNextClick(reply.data.next);
   }
 
   async function startCrawl() {
@@ -329,6 +354,7 @@
     if (!r.ok) { ui.stat.innerHTML = `<span class="err">${errorText(r.error)}</span>`; return; }
     crawling = true;
     showCrawl(r.data);
+    showNextClick(r.data.next);
   }
 
   function stopCrawl() {
@@ -343,7 +369,8 @@
     ui.bar.style.width = s.phase === 'finished' ? '100%' : total ? `${Math.round((s.done / total) * 100)}%` : '0';
     const counts = `<b>${s.done}</b> / ${s.limit} pages · added <b>${s.ingested}</b> · already saved ${s.duplicate} · failed ${s.failed}${s.skipped ? ` · blocked by robots ${s.skipped}` : ''}`;
     const where = escapeHtml(s.host);
-    if (s.running) ui.stat.innerHTML = `Crawling ${where}: ${counts}${s.current ? `<br>Last saved: ${escapeHtml(s.current.slice(0, 70))}` : ''}`;
+    const next = s.next ? `<br>Next: ${escapeHtml(decodeURI(new URL(s.next).pathname).slice(0, 70))}` : '';
+    if (s.running) ui.stat.innerHTML = `Crawling ${where}: ${counts}${s.current ? `<br>Saved: ${escapeHtml(s.current.slice(0, 70))}` : ''}${next}`;
     else ui.stat.innerHTML = `${s.phase === 'finished' ? 'Finished' : 'Stopped'} ${where}: ${counts}`;
   }
 
