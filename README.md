@@ -37,7 +37,8 @@ Everything runs on your machine: FastAPI, PostgreSQL with pgvector, and Ollama w
   - Reads and saves **popups and dialogs** as their own entries.
   - **Remembers** what it read: revisit a page and the highlights come back instantly; a page is **never saved twice**.
   - Works on **internal sites** too, because the browser sends the text it sees.
-  - **Crawl whole site**: follows links on the same website (100 to 2000 pages), respects `robots.txt`, one page per second.
+  - **Crawl whole site**: the spider travels through the website in your tab, page by page (100 to 2000 pages), reads and saves each page, respects `robots.txt`, and shows a **Windows notification** when it is done. Because your browser does the crawling, it reaches internal sites and pages you are logged into, and the server never downloads anything.
+  - **Error pages** (HTTP 404, 500, ...) are never saved.
 - **Grounded chat**: a ChatGPT/Claude-style UI with chat history, citations you can click, a **How to use** guide, light and dark mode, and a collapsible sidebar.
 - **No hallucinated answers**: questions that your documents don't cover (world knowledge, "write a poem", prompt injection) get *"No answer in your documents"*.
 - **Hybrid search**: pgvector cosine search plus keyword search on the rare words of the question, fused with reciprocal rank fusion.
@@ -60,30 +61,31 @@ The chat screenshots show real answers from the app: a question answered from a 
 
 ```mermaid
 flowchart LR
+    WEB(("Websites"))
     subgraph Browser
         EXT["RAG Spider extension<br/>reads the page you see"]
+        CRAWL["Crawl whole site<br/>spider visits each page:<br/>same site, robots.txt, notification"]
         UI["Chat UI<br/>127.0.0.1:8000"]
     end
     subgraph Server["FastAPI app (app.py)"]
         SAVE["/api/ingest/page<br/>store page text"]
-        CRAWL["Site crawler<br/>robots.txt, 1 page/s"]
         ASK["/api/ask<br/>retrieve, gate, generate, verify"]
     end
     DB[("PostgreSQL + pgvector<br/>documents, versions,<br/>chunks, embeddings")]
     OLL["Ollama<br/>qwen3-embedding:4b<br/>qwen3:8b"]
 
+    WEB --> EXT
+    WEB --> CRAWL
     EXT -- "page text" --> SAVE
-    EXT -- "Crawl whole site" --> CRAWL
-    CRAWL -- "fetch public pages" --> WEB(("Web"))
+    CRAWL -- "page text" --> SAVE
     SAVE --> DB
-    CRAWL --> DB
     UI -- "question" --> ASK
     ASK <--> DB
     SAVE -. "embed chunks" .-> OLL
     ASK -. "embed query + answer" .-> OLL
 ```
 
-**Saving a page:** the text is split into overlapping chunks (about 1800 tokens each), embedded with `qwen3-embedding:4b` and stored with full version history. A page whose text has not changed is not stored again.
+**Saving a page:** the browser sends the page's clean text; the server never downloads web pages itself. The text is split into overlapping chunks (about 1800 tokens each), embedded with `qwen3-embedding:4b` and stored with full version history. A page whose text has not changed is not stored again.
 
 **Answering a question:**
 
@@ -187,7 +189,7 @@ The shared zip file contains `db/ragdb.dump`, a ready database with the collecte
 
 You do **not** need a Chrome Web Store developer account. After updating the extension files, click the reload arrow on its card in `chrome://extensions` and press F5 on open tabs.
 
-The extension only talks to the local app at `http://127.0.0.1:8000`. Chrome lists it as able to "read and change data on all websites" because it draws the spider on every page; it only sends a page's text when it saves that page.
+The extension only talks to the local app at `http://127.0.0.1:8000`. Chrome lists it as able to "read and change data on all websites" because it draws the spider on every page; it only sends a page's text when it saves that page. It also asks for notifications (to tell you when a crawl is done) and alarms (to skip pages that never load).
 
 ## Using it
 
@@ -198,7 +200,7 @@ The app has a built-in **How to use** page in the sidebar. In short:
 | Collect a page | Turn the spider on and open the page. Wait until the panel says *saved to your database* (or *already in your database*) before asking about it; a page that is still saving cannot be found yet. |
 | Make the spider read | Move the mouse: it follows and highlights what it walks over. Stop moving: it reads the rest of the visible page by itself. Scroll: it reads the new text. |
 | Collect a popup | Open it; it is read and saved as its own entry. |
-| Crawl a whole public site | In the spider panel choose a limit and press **Crawl whole site**. **Stop** ends it. |
+| Crawl a whole site | In the spider panel choose a limit and press **Crawl whole site**. The spider moves this tab through the site, reading and saving each page; use another tab meanwhile. A Windows notification tells you when it is finished. **Stop** ends it; a later crawl skips pages already saved. |
 | Ask | Type in the chat. Click a citation number to see its source. Name the person, company or topic; ask in the language of the source for the most exact wording. Each question is answered on its own. |
 | Hide the sidebar | Click the panel icon at the top left. |
 | Delete everything collected | **Clean up all data** in the sidebar, then type `DELETE`. Chats in the browser and spider highlights are not affected. |
@@ -221,10 +223,7 @@ All settings live in `.env` (see `.env.example`).
 | `KEYWORD_MIN_SIMILARITY` | `0.35` | Lower cutoff for chunks containing a rare word of the question |
 | `KEYWORD_MAX_SHARE` | `0.05` | A word counts as rare if it is in at most this share of chunks |
 | `RAG_TEMPERATURE` | `0` | Answer randomness |
-| `HTTP_TIMEOUT_SECONDS` | `20` | Timeout for fetching pages and calling Ollama |
-| `CRAWL_DELAY_SECONDS` | `1.0` | Pause between crawled pages |
-| `MAX_RESPONSE_BYTES` | `10000000` | Largest page the crawler downloads |
-| `USER_AGENT` | `RAGReference/1.0` | User agent for crawling and robots.txt |
+| `HTTP_TIMEOUT_SECONDS` | `20` | Timeout for calls to Ollama |
 
 ## API
 
@@ -236,25 +235,21 @@ The app listens on `http://127.0.0.1:8000`. All POST endpoints take JSON.
 | GET | `/api/health` | | PostgreSQL and Ollama status |
 | POST | `/api/ask` | `{"question"}` | Grounded answer with sources |
 | POST | `/api/ingest/page` | `{"url", "title", "text", "section"?}` | Save page text sent by the extension; `section` names a popup. Returns `duplicate` if already saved |
-| POST | `/api/ingest` | `{"url", "skip_existing"?}` | Fetch and save one public URL on the server |
-| POST | `/api/crawl/site` | `{"url", "limit"}` | Start a same-site crawl (limit 1 to 2000) |
-| POST | `/api/crawl/stop` | `{}` | Stop the running crawl |
-| GET | `/api/crawl/status` | | Crawl progress and recent pages |
 | GET | `/api/data/stats` | | Number of pages and searchable chunks |
-| POST | `/api/data/clear` | `{"confirm": "DELETE"}` | Delete all data; tables stay. Refused while a crawl runs |
+| POST | `/api/data/clear` | `{"confirm": "DELETE"}` | Delete all data; tables stay |
 
 ## Project structure
 
 ```
 .
-├── app.py                 FastAPI app: extraction, chunking, storage, retrieval, answering, API
-├── crawler.py             Same-site breadth-first crawler with robots.txt support
+├── app.py                 FastAPI app: chunking, storage, retrieval, answering, API
 ├── schema.sql             Tables and indexes (applied automatically at startup)
 ├── static/index.html      Chat UI (single file, no build step)
 ├── spider_extension/      Chrome extension (Manifest V3)
 │   ├── manifest.json
-│   ├── background.js      Talks to the local API, validates requests
+│   ├── background.js      Talks to the local API; runs Crawl whole site (queue, robots.txt, notifications)
 │   ├── reader.js          Finds the readable content, popups, word positions and clean text
+│   ├── crawl.js           Shared crawl rules: which links belong to the site, robots.txt parsing
 │   ├── spider.js          The spider: body, 8 three-segment legs, gait and drawing
 │   ├── content.js         Reading, memory, saving, popups and the panel
 │   └── icons/
@@ -263,7 +258,6 @@ The app listens on `http://127.0.0.1:8000`. All POST endpoints take JSON.
 │   └── import_db.bat      Restore db/ragdb.dump
 ├── docs/images/           Screenshots for this README
 ├── test_app.py            Unit tests: chunking, grounding, search, endpoints
-├── test_crawler.py        Unit tests: crawler
 ├── eval_rag.py            Live evaluation against your database and Ollama
 ├── install.bat            Create .venv and install requirements
 ├── start.bat              Start the app
@@ -279,7 +273,7 @@ The app listens on `http://127.0.0.1:8000`. All POST endpoints take JSON.
 run_tests.bat
 ```
 
-Runs 49 offline unit tests: chunk offsets and overlap, the similarity gate, citation checking, rare-word keyword search, browser saves and duplicates, the data clean-up endpoint, the crawler (robots.txt, limits, stop), and more. No database or Ollama is needed.
+Runs 39 offline unit tests: chunk offsets and overlap, the similarity gate, citation checking, rare-word keyword search, page keys, browser saves and duplicates, never saving the app itself, and the data clean-up endpoints. No database or Ollama is needed.
 
 ```bat
 .venv\Scripts\python.exe eval_rag.py
@@ -298,11 +292,11 @@ Writes `db/ragdb.dump` (PostgreSQL custom format) from the database in `.env`. S
 ## Security and privacy
 
 - **Local only**: the server binds to `127.0.0.1`; there is no login, so do not expose it to a network.
-- **Safe server-side fetching**: the crawler only fetches public addresses on ports 80 and 443. It refuses private, loopback and link-local IPs, URLs with credentials, redirects, unexpected content types and oversized responses.
+- **The server never downloads web pages**: it only stores text your browser sends, so it cannot be tricked into reading your internal network (SSRF). Crawling happens in your browser, with your own access.
 - **No cross-site posting**: all write endpoints accept JSON only, so a website cannot silently post into the app.
 - **The app never saves itself**: pages of the RAG app are excluded in the extension and rejected by the server.
 - **Secrets stay out of git**: `.env` is ignored; only `.env.example` is committed.
-- **Deleting data** requires typing `DELETE`, and is refused while a crawl runs.
+- **Deleting data** requires typing `DELETE`.
 
 ## Known limitations
 
@@ -310,9 +304,10 @@ Writes `db/ragdb.dump` (PostgreSQL custom format) from the database in `.env`. S
 - The answer's **Sources** list shows all evidence sent to the model, including chunks the answer did not cite.
 - Answers translated across languages (for example a Uzbek question about Russian pages) can paraphrase loosely; asking in the source language is the most precise.
 - The spider highlights only what is on screen. The whole page is still saved as soon as you open it.
-- The crawler cannot read pages behind a login; use the spider on those pages instead.
+- A crawl takes about 5 seconds per page (the page renders, the spider reads it, then a polite pause), so 100 pages take roughly 8 minutes.
+- A crawl uses its tab: closing the tab or leaving the website stops it (you get a *crawl stopped* notification). A page that does not load within 30 seconds is skipped.
 - Very large pages (around 75 chunks or more) can hit the 20 second embedding timeout.
-- Old page versions are kept in the database (hidden from search); crawled pages also store their raw HTML.
+- Old page versions are kept in the database (hidden from search).
 - The cutoffs were calibrated on the development data; re-check them with `eval_rag.py` on a very different corpus or embedding model.
 
 ## Linux and macOS
@@ -325,7 +320,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env              # then set DATABASE_URL
 uvicorn app:app --host 127.0.0.1 --port 8000
-python -m pytest -q test_app.py test_crawler.py
+python -m pytest -q test_app.py
 
 # Database export and import
 pg_dump --dbname="$DATABASE_URL" --format=custom --no-owner --no-privileges --file=db/ragdb.dump
@@ -338,4 +333,4 @@ The shared database dump contains pages collected from public websites (mainly k
 
 ## Tech stack
 
-Python, FastAPI, PostgreSQL, pgvector, Ollama, Qwen3 (`qwen3:8b`, `qwen3-embedding:4b`), trafilatura, BeautifulSoup, psycopg 3, vanilla JavaScript, Canvas 2D, Chrome Extension Manifest V3.
+Python, FastAPI, PostgreSQL, pgvector, Ollama, Qwen3 (`qwen3:8b`, `qwen3-embedding:4b`), psycopg 3, vanilla JavaScript, Canvas 2D, Chrome Extension Manifest V3.

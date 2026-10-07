@@ -5,10 +5,11 @@
   const COLORS = ['#ff2bd6', '#38e1ff', '#3dff8f', '#ffc93d'];
   const READ_SPEED = 420, FOLLOW_SPEED = 700, FOOT_RADIUS = 24, MOUSE_PRIORITY_MS = 1500;
   const MIN_PAGE_TEXT = 200, MIN_POPUP_TEXT = 40;
+  const CRAWL_SETTLE_MS = 1200, CRAWL_READ_MS = 2500;
   const MEASURE_MS = 700, WATCH_MS = 500, RESCAN_MS = 2000, REMEMBER_MS = 1000, MEMORY_LIMIT = 400;
 
   const mouse = {x: innerWidth * 0.6, y: innerHeight * 0.4, movedAt: 0};
-  let host = null, ui = null, spider = null, frame = null, lastTime = 0, timers = [];
+  let host = null, ui = null, spider = null, frame = null, lastTime = 0, timers = [], crawling = false;
   let url = null, page = null, popup = null, inset = 0, measuredAt = 0;
 
   const STYLE = `
@@ -92,16 +93,24 @@
     if (old.length) chrome.storage.local.remove(old.map(([k]) => k));
   }
 
+  const httpStatus = () => performance.getEntriesByType('navigation')[0]?.responseStatus || 200;
+
   async function save(view) {
-    const minimum = view.section ? MIN_POPUP_TEXT : MIN_PAGE_TEXT;
-    if (view.text.length < minimum) { view.saved = '<span class="dup">not enough text to save</span>'; return showState(); }
-    view.saved = 'saving...';
+    const minimum = view.section ? MIN_POPUP_TEXT : MIN_PAGE_TEXT, status = httpStatus();
+    let outcome = 'failed';
+    if (!view.section && status >= 400) view.saved = `<span class="dup">error page (HTTP ${status}), not saved</span>`;
+    else if (view.text.length < minimum) view.saved = '<span class="dup">not enough text to save</span>';
+    else {
+      view.saved = 'saving...';
+      showState();
+      const r = await send({type: 'savePage', url: location.href, title: view.section ? view.title : document.title, text: view.text, section: view.section});
+      outcome = r.ok ? (r.data.status === 'ingested' ? 'ingested' : 'duplicate') : 'failed';
+      if (!r.ok) view.saved = `<span class="err">not saved: ${errorText(r.error)}</span>`;
+      else if (outcome === 'ingested') view.saved = '<span class="ok">saved to your database</span>';
+      else view.saved = '<span class="dup">already in your database</span>';
+    }
     showState();
-    const r = await send({type: 'savePage', url: location.href, title: view.section ? view.title : document.title, text: view.text, section: view.section});
-    if (!r.ok) view.saved = `<span class="err">not saved: ${errorText(r.error)}</span>`;
-    else if (r.data.status === 'ingested') view.saved = '<span class="ok">saved to your database</span>';
-    else view.saved = '<span class="dup">already in your database</span>';
-    showState();
+    return outcome;
   }
 
   function showState() {
@@ -119,7 +128,8 @@
     page = makeView(RagReader.readPage(), null);
     RagReader.measure(page.items);
     showState();
-    restore(page).then(() => save(page));
+    page.saving = restore(page).then(() => save(page));
+    return page.saving;
   }
 
   function rescan() {
@@ -274,31 +284,49 @@
     frame = requestAnimationFrame(loop);
   }
 
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const pageLinks = () => [...new Set([...document.querySelectorAll('a[href]')].map(a => a.href))].slice(0, 5000);
+
+  async function startPage() {
+    url = location.href;
+    const r = await send({type: 'crawlCheck'});
+    const check = r.ok ? r.data : {crawling: false, state: null};
+    if (check.state) showCrawl(check.state);
+    if (!check.crawling) return loadPage();
+    crawling = true;
+    await sleep(CRAWL_SETTLE_MS);
+    if (!ui) return;
+    const outcome = await loadPage();
+    await sleep(CRAWL_READ_MS);
+    if (ui && crawling) send({type: 'crawlPage', url: location.href, title: document.title, outcome, links: pageLinks()});
+  }
+
   async function startCrawl() {
     ui.start.disabled = true;
-    const r = await send({type: 'start', url: location.href, limit: Number(ui.limit.value)});
+    const outcome = await (page?.saving || Promise.resolve('failed'));
+    const robots = await fetch('/robots.txt', {credentials: 'include'}).then(r => (r.ok ? r.text() : '')).catch(() => '');
+    const r = await send({type: 'crawlStart', url: location.href, title: document.title, limit: Number(ui.limit.value), robots, outcome, links: pageLinks()});
+    if (!ui) return;
     ui.start.disabled = false;
-    if (!r.ok) return setStat(`<span class="err">${errorText(r.error)}</span>`);
-    if (!r.data.started) setStat('<span class="err">Another crawl is already running. Stop it first.</span>');
-    poll();
+    if (!r.ok) { ui.stat.innerHTML = `<span class="err">${errorText(r.error)}</span>`; return; }
+    crawling = true;
+    showCrawl(r.data);
   }
 
-  function setStat(html) {
-    ui.stat.innerHTML = html;
+  function stopCrawl() {
+    crawling = false;
+    send({type: 'crawlStop'});
   }
 
-  async function poll() {
+  function showCrawl(s) {
     if (!ui) return;
-    const r = await send({type: 'status'});
-    if (!ui) return;
-    if (!r.ok) { ui.start.hidden = false; ui.stop.hidden = true; return setStat(`<span class="err">${errorText(r.error)}</span>`); }
-    const s = r.data, total = s.limit ? Math.min(s.found, s.limit) : s.found;
     ui.start.hidden = s.running; ui.stop.hidden = !s.running; ui.limit.disabled = s.running;
-    ui.bar.style.width = total ? `${Math.round((s.done / total) * 100)}%` : '0';
-    const where = s.start_url ? escapeHtml(new URL(s.start_url).hostname) : 'site';
-    const counts = `<b>${s.done}</b>${s.limit ? ` / ${s.limit}` : ''} pages · added <b>${s.ingested}</b> · failed ${s.failed}${s.skipped ? ` · blocked by robots ${s.skipped}` : ''}`;
-    if (s.running) setStat(`Crawling ${where}: ${counts}`);
-    else if (s.phase === 'finished' || s.phase === 'stopped') setStat(`${s.phase === 'finished' ? 'Finished' : 'Stopped'} ${where}: ${counts}`);
+    const total = Math.min(s.found, s.limit);
+    ui.bar.style.width = s.phase === 'finished' ? '100%' : total ? `${Math.round((s.done / total) * 100)}%` : '0';
+    const counts = `<b>${s.done}</b> / ${s.limit} pages · added <b>${s.ingested}</b> · already saved ${s.duplicate} · failed ${s.failed}${s.skipped ? ` · blocked by robots ${s.skipped}` : ''}`;
+    const where = escapeHtml(s.host);
+    if (s.running) ui.stat.innerHTML = `Crawling ${where}: ${counts}${s.current ? `<br>Last saved: ${escapeHtml(s.current.slice(0, 70))}` : ''}`;
+    else ui.stat.innerHTML = `${s.phase === 'finished' ? 'Finished' : 'Stopped'} ${where}: ${counts}`;
   }
 
   function sizeCanvas() {
@@ -321,7 +349,7 @@
           <button class="start" type="button">Crawl whole site</button>
           <button class="stop" type="button" hidden>Stop</button>
         </div>
-        <div class="stat">Crawls public pages of this website into your RAG database.</div>
+        <div class="stat">The spider visits every page of this website, reads and saves it, and notifies you when it is done. Use another tab meanwhile.</div>
         <div class="bar"><i></i></div>
       </section>`;
     ui = {
@@ -330,15 +358,14 @@
     };
     root.querySelector('.x').addEventListener('click', () => chrome.storage.local.set({enabled: false}));
     ui.start.addEventListener('click', startCrawl);
-    ui.stop.addEventListener('click', () => send({type: 'stop'}).then(poll));
+    ui.stop.addEventListener('click', stopCrawl);
     document.documentElement.append(host);
     sizeCanvas();
     spider = new RagSpider(mouse.x + scrollX, mouse.y + scrollY);
-    loadPage();
-    poll();
+    startPage();
     pruneMemory();
     timers = [
-      setInterval(poll, 1500), setInterval(watch, WATCH_MS), setInterval(rescan, RESCAN_MS),
+      setInterval(watch, WATCH_MS), setInterval(rescan, RESCAN_MS),
       setInterval(() => { remember(page); remember(popup); }, REMEMBER_MS),
     ];
     lastTime = performance.now();
@@ -347,6 +374,7 @@
 
   function teardown() {
     remember(page); remember(popup);
+    if (crawling) stopCrawl();
     cancelAnimationFrame(frame);
     timers.forEach(clearInterval);
     host?.remove();
@@ -356,6 +384,11 @@
   addEventListener('mousemove', e => Object.assign(mouse, {x: e.clientX, y: e.clientY, movedAt: performance.now()}), {passive: true});
   addEventListener('resize', () => { if (ui) sizeCanvas(); });
   addEventListener('pagehide', () => { remember(page); remember(popup); });
+  chrome.runtime.onMessage.addListener(message => {
+    if (message?.type !== 'crawlState') return;
+    crawling = message.state.running;
+    showCrawl(message.state);
+  });
   chrome.storage.onChanged.addListener(changes => {
     if (!changes.enabled) return;
     changes.enabled.newValue ? (host || build()) : teardown();

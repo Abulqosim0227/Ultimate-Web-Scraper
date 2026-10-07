@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RAG Spider",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "description": "A spider that follows your mouse and crawls the site you are on into your local RAG app.",
   "icons": {"16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png"},
   "action": {
@@ -9,7 +9,7 @@
     "default_icon": {"16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png"}
   },
   "background": {"service_worker": "background.js"},
-  "permissions": ["storage"],
+  "permissions": ["storage", "notifications", "alarms"],
   "host_permissions": ["http://127.0.0.1:8000/*"],
   "content_scripts": [
     {"matches": ["http://*/*", "https://*/*"], "exclude_matches": ["http://127.0.0.1:8000/*", "http://localhost:8000/*"], "js": ["reader.js", "spider.js", "content.js"], "run_at": "document_idle"}

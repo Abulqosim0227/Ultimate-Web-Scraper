@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 import app
-from app import REFUSAL, Chunk, build_prompt, chunk_text, grounded, page_links
+from app import REFUSAL, Chunk, build_prompt, chunk_text, grounded
 
 MAX_CHARS = 1800 * 4
 SINGLE_NEWLINES = '\n'.join(f'Paragraph {i} ' + 'word ' * 60 for i in range(60))
@@ -130,27 +130,6 @@ def test_answer_replaces_unsupported_llm_output_with_refusal(offline):
     assert result['sources'] == []
 
 
-def test_page_links_resolves_relative_links():
-    html = '<a href="/news/1">a</a><a href="https://x.uz/p">b</a><a href="rel">c</a><a>no href</a>'
-    assert page_links(html, 'https://kun.uz/news/') == ['https://kun.uz/news/1', 'https://x.uz/p', 'https://kun.uz/news/rel']
-
-
-def test_ingest_skips_pages_already_in_the_database(monkeypatch):
-    monkeypatch.setattr(app, 'safe_url', lambda url: url)
-    monkeypatch.setattr(app, 'existing_document', lambda url: 7)
-    monkeypatch.setattr(app, 'ingest', lambda url: (_ for _ in ()).throw(AssertionError('must not scrape again')))
-    result = app.api_ingest(app.IngestRequest(url='https://kun.uz/news/a', skip_existing=True))
-    assert result == {'status': 'duplicate', 'document_id': 7}
-
-
-def test_ingest_scrapes_new_pages_when_skipping_existing(monkeypatch):
-    monkeypatch.setattr(app, 'safe_url', lambda url: url)
-    monkeypatch.setattr(app, 'existing_document', lambda url: None)
-    monkeypatch.setattr(app, 'ingest', lambda url: {'status': 'ingested', 'chunks': 2})
-    result = app.api_ingest(app.IngestRequest(url='https://kun.uz/news/b', skip_existing=True))
-    assert result == {'status': 'ingested', 'chunks': 2}
-
-
 def test_page_key_normalizes_urls_and_names_sections():
     assert app.page_key('https://Nihol.uz/partners?x=1#top') == 'https://nihol.uz/partners?x=1'
     assert app.page_key('https://nihol.uz') == 'https://nihol.uz/'
@@ -176,14 +155,13 @@ def test_saving_a_page_twice_is_a_duplicate(monkeypatch):
     assert app.api_ingest_page(page_request(), APP_REQUEST) == {'status': 'duplicate', 'document_id': 5}
 
 
-def test_saving_a_new_popup_stores_browser_text_without_fetching(monkeypatch):
+def test_saving_a_new_popup_stores_browser_text(monkeypatch):
     calls = []
     monkeypatch.setattr(app, 'existing_document', lambda key: None)
-    monkeypatch.setattr(app, 'fetch', lambda *a: (_ for _ in ()).throw(AssertionError('must not fetch')))
     monkeypatch.setattr(app, 'store_document', lambda *a: calls.append(a) or {'status': 'ingested', 'chunks': 1})
     result = app.api_ingest_page(page_request(section='H3C'), APP_REQUEST)
     assert result == {'status': 'ingested', 'chunks': 1}
-    assert calls == [('https://nihol.uz/partners#popup-h3c', 'Partners', ('H3C partner text ' * 5).strip(), 'browser', None)]
+    assert calls == [('https://nihol.uz/partners#popup-h3c', 'Partners', ('H3C partner text ' * 5).strip(), 'browser')]
 
 
 def test_page_endpoint_rejects_non_json_posts_from_websites():
@@ -191,14 +169,6 @@ def test_page_endpoint_rejects_non_json_posts_from_websites():
     response = TestClient(app.app).post('/api/ingest/page', content='{"url":"https://a.uz/","title":"t","text":"' + 'x' * 50 + '"}',
                                         headers={'Content-Type': 'text/plain'})
     assert response.status_code == 422
-
-
-def test_extracted_text_has_no_link_markup():
-    body = ''.join(f'<p>Paragraph {i} mentions <a href="https://www.dw.com/ru/v{i}">oshgan</a> and more words about the story here.</p>' for i in range(12))
-    html = f'<html><head><title>Story</title></head><body><article>{body}</article></body></html>'
-    title, text, _ = app.extract(html, 'https://kun.uz/news/a')
-    assert 'oshgan' in text
-    assert '](' not in text and 'https://' not in text
 
 
 def test_informative_terms_keep_rare_words_and_drop_filler_and_numbers():
@@ -236,7 +206,6 @@ def recording_db(monkeypatch):
 
 def test_clear_data_empties_every_table_but_keeps_them(monkeypatch):
     sql = recording_db(monkeypatch)
-    monkeypatch.setattr(app.crawler, 'status', lambda: {'running': False})
     assert app.api_data_clear(app.ClearRequest(confirm='DELETE')) == {'cleared': True, 'pages_deleted': 409}
     truncate = next(q for q in sql if q.startswith('TRUNCATE'))
     for table in ('documents', 'raw_documents', 'document_versions', 'chunks', 'embeddings', 'retrieval_traces', 'embedding_models'):
@@ -249,14 +218,6 @@ def test_clear_data_requires_typed_confirmation(monkeypatch):
     with pytest.raises(app.HTTPException) as error:
         app.api_data_clear(app.ClearRequest(confirm='yes'))
     assert error.value.status_code == 400 and sql == []
-
-
-def test_clear_data_refuses_while_crawling(monkeypatch):
-    sql = recording_db(monkeypatch)
-    monkeypatch.setattr(app.crawler, 'status', lambda: {'running': True})
-    with pytest.raises(app.HTTPException) as error:
-        app.api_data_clear(app.ClearRequest(confirm='DELETE'))
-    assert error.value.status_code == 409 and sql == []
 
 
 def test_data_stats_counts_pages_and_chunks(monkeypatch):

@@ -2,8 +2,6 @@ fastapi==0.117.1
 uvicorn[standard]==0.36.0
 psycopg[binary]==3.2.10
 httpx==0.28.1
-beautifulsoup4==4.14.2
-trafilatura==2.0.0
 pydantic-settings==2.11.0
 python-multipart==0.0.20
 pytest==9.1.1

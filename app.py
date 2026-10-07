@@ -1,27 +1,20 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
-import json
 import math
 import re
-import socket
 import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import psycopg
-from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-import trafilatura
-
-from crawler import Crawler
 
 
 class Settings(BaseSettings):
@@ -40,9 +33,6 @@ class Settings(BaseSettings):
     embed_query_prefix: str = 'Instruct: Given a question, retrieve passages from the document collection that answer it\nQuery: '
     rag_temperature: float = 0.0
     http_timeout_seconds: float = 20.0
-    crawl_delay_seconds: float = 1.0
-    max_response_bytes: int = 10_000_000
-    user_agent: str = 'RAGReference/1.0'
 
 
 settings = Settings()
@@ -53,7 +43,6 @@ CITATION = re.compile(r'\[E(\d+)\]')
 CONTENT_WORD = re.compile(r'\w{5,}|\d+')
 TERM = re.compile(r'[^\W\d_]{4,}')
 LATEST_VERSION = 'NOT EXISTS (SELECT 1 FROM document_versions newer WHERE newer.document_id = dv.document_id AND newer.version_number > dv.version_number)'
-HTML_TYPES = frozenset({'text/html', 'application/xhtml+xml', 'text/plain'})
 DATA_TABLES = ('retrieval_traces', 'embeddings', 'chunks', 'document_versions', 'raw_documents', 'documents', 'embedding_models')
 
 
@@ -85,21 +74,11 @@ class ClearRequest(BaseModel):
     confirm: str = Field(max_length=20)
 
 
-class SiteCrawlRequest(BaseModel):
-    url: str = Field(min_length=8, max_length=2048)
-    limit: int = Field(default=100, ge=1, le=2000)
-
-
 class PageRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     title: str = Field(default='', max_length=1000)
     text: str = Field(min_length=20, max_length=500_000)
     section: str | None = Field(default=None, max_length=200)
-
-
-class IngestRequest(BaseModel):
-    url: str = Field(min_length=8, max_length=2048)
-    skip_existing: bool = False
 
 
 class Ollama:
@@ -138,72 +117,6 @@ ollama = Ollama(settings.ollama_url)
 
 def db():
     return psycopg.connect(settings.database_url)
-
-
-def safe_url(value: str) -> str:
-    p = urlsplit(value.strip())
-    if p.scheme not in {'http', 'https'} or p.username or p.password or not p.hostname:
-        raise ValueError('Only credential-free HTTP(S) URLs are allowed')
-    host = p.hostname.encode('idna').decode('ascii').lower().rstrip('.')
-    try:
-        port = p.port or (443 if p.scheme == 'https' else 80)
-    except ValueError as exc:
-        raise ValueError('Invalid port') from exc
-    if port not in {80, 443}:
-        raise ValueError('Only ports 80 and 443 are allowed')
-    for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
-        ip = ipaddress.ip_address(item[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
-            raise ValueError('Target resolves to a non-public address')
-    return urlunsplit((p.scheme, host if port in {80, 443} else f'{host}:{port}', p.path or '/', p.query, ''))
-
-
-def fetch(url: str, allowed_types: frozenset[str] = HTML_TYPES) -> tuple[str, str]:
-    target = safe_url(url)
-    with httpx.Client(timeout=settings.http_timeout_seconds, follow_redirects=False, trust_env=False, headers={'User-Agent': settings.user_agent}) as client:
-        with client.stream('GET', target) as r:
-            if r.status_code >= 300 and r.status_code < 400:
-                raise ValueError('Redirects are disabled; ingest the final public URL explicitly')
-            r.raise_for_status()
-            content_type = r.headers.get('content-type', '').split(';', 1)[0].lower()
-            if content_type not in allowed_types:
-                raise ValueError(f'Unsupported content type: {content_type}')
-            size = 0
-            parts: list[bytes] = []
-            for part in r.iter_bytes(65536):
-                size += len(part)
-                if size > settings.max_response_bytes:
-                    raise ValueError('Response exceeds configured size limit')
-                parts.append(part)
-            return b''.join(parts).decode(r.encoding or 'utf-8', errors='replace'), content_type
-
-
-def classify(html: str) -> str:
-    soup = BeautifulSoup(html, 'html.parser')
-    links = len(soup.find_all('a'))
-    text = soup.get_text(' ', strip=True)
-    headings = len(soup.find_all(['h1', 'h2', 'h3']))
-    if links > 20 and len(text) < 5000:
-        return 'master'
-    if headings >= 2 and len(text) > 1500:
-        return 'detailed_static'
-    if len(text) > 300:
-        return 'detailed'
-    return 'unknown'
-
-
-def extract(html: str, base_url: str) -> tuple[str, str, str]:
-    title = BeautifulSoup(html, 'html.parser').title
-    title_text = title.get_text(' ', strip=True) if title else ''
-    text = trafilatura.extract(html, include_links=False, include_tables=True, favor_precision=True) or ''
-    if not text:
-        text = BeautifulSoup(html, 'html.parser').get_text('\n', strip=True)
-    text = re.sub(r'\n{3,}', '\n\n', text).strip()
-    return title_text[:1000], text, classify(html)
-
-
-def page_links(html: str, base_url: str) -> list[str]:
-    return [urljoin(base_url, a['href']) for a in BeautifulSoup(html, 'html.parser').find_all('a', href=True)]
 
 
 def normalize_query(q: str) -> str:
@@ -273,16 +186,6 @@ def ensure_model(conn) -> tuple[int, int]:
         return cur.fetchone()
 
 
-def ingest(url: str, details: bool = False) -> dict:
-    html, content_type = fetch(url)
-    canonical = safe_url(url)
-    title, cleaned, page_type = extract(html, canonical)
-    result = store_document(canonical, title, cleaned, page_type, (html, content_type))
-    if details:
-        result |= {'title': title, 'links': page_links(html, canonical)}
-    return result
-
-
 def page_key(url: str, section: str | None = None) -> str:
     p = urlsplit(url.strip())
     if p.scheme not in {'http', 'https'} or not p.hostname or p.username or p.password:
@@ -294,7 +197,7 @@ def page_key(url: str, section: str | None = None) -> str:
     return key
 
 
-def store_document(canonical: str, title: str, cleaned: str, page_type: str, raw: tuple[str, str] | None) -> dict:
+def store_document(canonical: str, title: str, cleaned: str, page_type: str) -> dict:
     if len(cleaned) < 20:
         raise ValueError('Extracted content is too small')
     text_hash = hashlib.sha256(cleaned.encode('utf-8')).hexdigest()
@@ -315,10 +218,6 @@ def store_document(canonical: str, title: str, cleaned: str, page_type: str, raw
             cur.execute('INSERT INTO documents(canonical_url,title,page_type) VALUES(%s,%s,%s) RETURNING id', (canonical, title, page_type))
             document_id = cur.fetchone()[0]
             version = 1
-        if raw:
-            html, content_type = raw
-            raw_hash = hashlib.sha256(html.encode('utf-8')).hexdigest()
-            cur.execute('INSERT INTO raw_documents(document_id,content_hash,content_type,raw_content) VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING', (document_id, raw_hash, content_type, html))
         cur.execute('INSERT INTO document_versions(document_id,version_number,content_hash,cleaned_content) VALUES(%s,%s,%s,%s) RETURNING id', (document_id, version, text_hash, cleaned))
         version_id = cur.fetchone()[0]
         chunks = chunk_text(cleaned)
@@ -468,18 +367,6 @@ def health():
     return checks
 
 
-@app.post('/api/ingest')
-def api_ingest(request: IngestRequest):
-    try:
-        if request.skip_existing:
-            document_id = existing_document(safe_url(request.url))
-            if document_id:
-                return {'status': 'duplicate', 'document_id': document_id}
-        return ingest(request.url)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @app.post('/api/ingest/page')
 def api_ingest_page(request: PageRequest, http_request: Request):
     try:
@@ -489,7 +376,7 @@ def api_ingest_page(request: PageRequest, http_request: Request):
         document_id = existing_document(key)
         if document_id:
             return {'status': 'duplicate', 'document_id': document_id}
-        return store_document(key, request.title.strip()[:1000], request.text.strip(), 'browser', None)
+        return store_document(key, request.title.strip()[:1000], request.text.strip(), 'browser')
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -508,10 +395,6 @@ def existing_document(canonical_url: str) -> int | None:
     return row[0] if row else None
 
 
-crawler = Crawler(lambda url: fetch(url, frozenset({'text/plain'}))[0], lambda url: ingest(url, details=True),
-                  settings.crawl_delay_seconds, settings.user_agent)
-
-
 @app.get('/api/data/stats')
 def api_data_stats():
     with db() as conn:
@@ -524,29 +407,7 @@ def api_data_stats():
 def api_data_clear(request: ClearRequest):
     if request.confirm != 'DELETE':
         raise HTTPException(status_code=400, detail='Type DELETE to confirm')
-    if crawler.status()['running']:
-        raise HTTPException(status_code=409, detail='Stop the running crawl first')
     with db() as conn:
         pages = conn.execute('SELECT count(*) FROM documents').fetchone()[0]
         conn.execute(f"TRUNCATE {', '.join(DATA_TABLES)} RESTART IDENTITY")
     return {'cleared': True, 'pages_deleted': pages}
-
-
-@app.post('/api/crawl/site')
-def api_crawl_site(request: SiteCrawlRequest):
-    try:
-        start_url = safe_url(request.url)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {'started': crawler.start_site(start_url, request.limit)}
-
-
-@app.post('/api/crawl/stop')
-def api_crawl_stop():
-    crawler.stop()
-    return {'stopping': True}
-
-
-@app.get('/api/crawl/status')
-def api_crawl_status():
-    return crawler.status()
