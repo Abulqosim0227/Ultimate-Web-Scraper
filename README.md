@@ -195,7 +195,7 @@ The app has a built-in **How to use** page in the sidebar. In short:
 
 | Task | How |
 |---|---|
-| Collect a page | Turn the spider on and open the page. The panel says *saved to your database* (or *already in your database*). |
+| Collect a page | Turn the spider on and open the page. Wait until the panel says *saved to your database* (or *already in your database*) before asking about it; a page that is still saving cannot be found yet. |
 | Make the spider read | Move the mouse: it follows and highlights what it walks over. Stop moving: it reads the rest of the visible page by itself. Scroll: it reads the new text. |
 | Collect a popup | Open it; it is read and saved as its own entry. |
 | Crawl a whole public site | In the spider panel choose a limit and press **Crawl whole site**. **Stop** ends it. |
